@@ -132,13 +132,17 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
                 result(true)
                 return
             }
-            if(self.isFromPushKit){
+            // Act on the call Dart named. Falling back to self.data (the
+            // last call pushed) only when no id came, so ending one call
+            // never ends another that was pushed after it.
+            if let getArgs = args as? [String: Any],
+               let id = getArgs["id"] as? String, !id.isEmpty {
+                self.endCall(Data(args: getArgs))
+            } else if(self.isFromPushKit), let stored = self.data {
+                self.endCall(stored)
+            } else if let getArgs = args as? [String: Any] {
+                self.data = Data(args: getArgs)
                 self.endCall(self.data!)
-            }else{
-                if let getArgs = args as? [String: Any] {
-                    self.data = Data(args: getArgs)
-                    self.endCall(self.data!)
-                }
             }
             result(true)
             break
@@ -181,13 +185,15 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
                 result(true)
                 return
             }
-            if(self.isFromPushKit){
+            // As endCall: the call Dart named, self.data only without an id.
+            if let getArgs = args as? [String: Any],
+               let id = getArgs["id"] as? String, !id.isEmpty {
+                self.connectedCall(Data(args: getArgs))
+            } else if(self.isFromPushKit), let stored = self.data {
+                self.connectedCall(stored)
+            } else if let getArgs = args as? [String: Any] {
+                self.data = Data(args: getArgs)
                 self.connectedCall(self.data!)
-            }else{
-                    if let getArgs = args as? [String: Any] {
-                    self.data = Data(args: getArgs)
-                    self.connectedCall(self.data!)
-                    }
             }
             result(true)
             break
@@ -258,11 +264,9 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     }
     
     @objc public func showCallkitIncoming(_ data: Data, fromPushKit: Bool, onError: ((Error?) -> Void)? = nil) {
-        self.isFromPushKit = fromPushKit
-        if(fromPushKit){
-            self.data = data
-        }
-        
+        // self.data / isFromPushKit are set once CallKit has accepted the
+        // call (below): a call it refuses (one already going) must not
+        // replace the call that is.
         if(data.isShowMissedCallNotification){
             CallkitNotificationManager.shared.addNotificationCategory(data.missedNotificationCallbackText)
         }
@@ -296,6 +300,10 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
         // the call is successfully reported, matching the fromPushKit variant.
         self.sharedProvider?.reportNewIncomingCall(with: uuid, update: callUpdate) { error in
             if(error == nil) {
+                self.isFromPushKit = fromPushKit
+                if(fromPushKit){
+                    self.data = data
+                }
                 self.configureAudioSession()
                 let call = Call(uuid: uuid, data: data)
                 call.handle = data.handle
@@ -313,11 +321,9 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     }
     
     @objc public func showCallkitIncoming(_ data: Data, fromPushKit: Bool, completion: @escaping () -> Void) {
-        self.isFromPushKit = fromPushKit
-        if(fromPushKit){
-            self.data = data
-        }
-        
+        // self.data / isFromPushKit are set once CallKit has accepted the
+        // call (below): a call it refuses (one already going) must not
+        // replace the call that is.
         if(data.isShowMissedCallNotification){
             CallkitNotificationManager.shared.addNotificationCategory(data.missedNotificationCallbackText)
         }
@@ -347,6 +353,10 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
         
         self.sharedProvider?.reportNewIncomingCall(with: uuid, update: callUpdate) { error in
             if(error == nil) {
+                self.isFromPushKit = fromPushKit
+                if(fromPushKit){
+                    self.data = data
+                }
                 self.configureAudioSession()
                 let call = Call(uuid: uuid, data: data)
                 call.handle = data.handle
@@ -394,19 +404,23 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     
     @objc public func endCall(_ data: Data) {
         // Guard against malformed UUID — see CallManager.swift:startCall for rationale.
-        // PushKit branch reads uuid from self.data (stored during showCallkitIncoming);
-        // non-PushKit reads from the incoming data. Either source can be invalid.
+        // The call named by data.uuid; self.data (the pushed call) only
+        // when data names none. The PushKit state is cleared only when the
+        // pushed call itself ends.
         let uuidSourceString: String
-        if self.isFromPushKit {
-            guard let stored = self.data else {
-                NSLog("[CallkitIncoming] endCall: PushKit branch but self.data is nil — ignored")
-                return
-            }
-            uuidSourceString = stored.uuid
-            self.isFromPushKit = false
-            self.sendEvent(SwiftFlutterCallkitIncomingPlugin.ACTION_CALL_ENDED, data.toJSON())
-        } else {
+        if !data.uuid.isEmpty {
             uuidSourceString = data.uuid
+        } else if self.isFromPushKit, let stored = self.data {
+            uuidSourceString = stored.uuid
+        } else {
+            NSLog("[CallkitIncoming] endCall: no call id — ignored")
+            return
+        }
+        if self.isFromPushKit, let stored = self.data,
+           stored.uuid.lowercased() == uuidSourceString.lowercased() {
+            self.isFromPushKit = false
+            // The pushed call's own data: Dart may have passed only its id
+            self.sendEvent(SwiftFlutterCallkitIncomingPlugin.ACTION_CALL_ENDED, stored.toJSON())
         }
         guard let uuid = UUID(uuidString: uuidSourceString) else {
             NSLog("[CallkitIncoming] endCall: invalid UUID '\(uuidSourceString)' — ignored")
@@ -420,16 +434,19 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     
     @objc public func connectedCall(_ data: Data) {
         // Guard against malformed UUID — see CallManager.swift:startCall for rationale.
+        // As endCall: the call named by data.uuid, else the pushed one.
         let uuidSourceString: String
-        if self.isFromPushKit {
-            guard let stored = self.data else {
-                NSLog("[CallkitIncoming] connectedCall: PushKit branch but self.data is nil — ignored")
-                return
-            }
-            uuidSourceString = stored.uuid
-            self.isFromPushKit = false
-        } else {
+        if !data.uuid.isEmpty {
             uuidSourceString = data.uuid
+        } else if self.isFromPushKit, let stored = self.data {
+            uuidSourceString = stored.uuid
+        } else {
+            NSLog("[CallkitIncoming] connectedCall: no call id — ignored")
+            return
+        }
+        if self.isFromPushKit, let stored = self.data,
+           stored.uuid.lowercased() == uuidSourceString.lowercased() {
+            self.isFromPushKit = false
         }
         guard let uuid = UUID(uuidString: uuidSourceString) else {
             NSLog("[CallkitIncoming] connectedCall: invalid UUID '\(uuidSourceString)' — ignored")
