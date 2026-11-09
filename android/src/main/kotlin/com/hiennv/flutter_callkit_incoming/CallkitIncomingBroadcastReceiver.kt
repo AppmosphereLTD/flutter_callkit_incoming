@@ -325,6 +325,16 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
                     driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_CONNECTED)
                     // update notification on going connected
                     getCallkitNotificationManager()?.showOngoingCallNotification(data, true)
+                    // A call answered inside the app gets its foreground
+                    // service here (no ACCEPT started one). The app calls
+                    // setCallConnected while still in the foreground, which
+                    // Android 14 needs for a microphone service. A no-op
+                    // when START or ACCEPT already started the service.
+                    CallkitNotificationService.startServiceWithAction(
+                        context,
+                        CallkitConstants.ACTION_CALL_CONNECTED,
+                        data
+                    )
                     sendEventFlutter(CallkitConstants.ACTION_CALL_CONNECTED, data)
                 } catch (error: Exception) {
                     Log.e(TAG, null, error)
