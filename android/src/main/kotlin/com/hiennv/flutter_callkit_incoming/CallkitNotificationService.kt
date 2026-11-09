@@ -24,11 +24,22 @@ class CallkitNotificationService : Service() {
 
         private val ActionForeground = listOf(
             CallkitConstants.ACTION_CALL_START,
-            CallkitConstants.ACTION_CALL_ACCEPT
+            CallkitConstants.ACTION_CALL_ACCEPT,
+            CallkitConstants.ACTION_CALL_CONNECTED
         )
+
+        /**
+         * True while this service holds a foreground notification. A call
+         * answered inside the app never goes through ACTION_CALL_ACCEPT, so
+         * ACTION_CALL_CONNECTED starts the service for it; when START or
+         * ACCEPT already did, CONNECTED must not start it a second time.
+         */
+        @Volatile
+        private var isForeground = false
 
 
         fun startServiceWithAction(context: Context, action: String, data: Bundle?) {
+            if (action == CallkitConstants.ACTION_CALL_CONNECTED && isForeground) return
             val intent = Intent(context, CallkitNotificationService::class.java).apply {
                 this.action = action
                 putExtra(CallkitConstants.EXTRA_CALLKIT_INCOMING_DATA, data)
@@ -101,6 +112,21 @@ class CallkitNotificationService : Service() {
                         }
                 }
 
+                CallkitConstants.ACTION_CALL_CONNECTED -> {
+                    // A call answered inside the app: no ACCEPT came, so
+                    // nothing holds the call in the foreground yet. Hold it
+                    // like an accepted call, showing it as connected.
+                    intent.getBundleExtra(CallkitConstants.EXTRA_CALLKIT_INCOMING_DATA)
+                        ?.let {
+                            if (it.getBoolean(CallkitConstants.EXTRA_CALLKIT_CALLING_SHOW, true)) {
+                                getCallkitNotificationManager()?.createNotificationChanel(it)
+                                showOngoingCallNotification(it, true)
+                            } else {
+                                stopSelf()
+                            }
+                        }
+                }
+
                 null -> {
                     // OS restarted the service after kill (START_STICKY with null intent).
                     // Flutter engine may not be running yet — create a standalone manager
@@ -140,10 +166,10 @@ class CallkitNotificationService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun showOngoingCallNotification(bundle: Bundle) {
+    private fun showOngoingCallNotification(bundle: Bundle, isConnected: Boolean = false) {
 
         val callkitNotification =
-            getCallkitNotificationManager()?.getOnGoingCallNotification(bundle, false)
+            getCallkitNotificationManager()?.getOnGoingCallNotification(bundle, isConnected)
         if (callkitNotification != null) {
             val typeCall = bundle.getInt(CallkitConstants.EXTRA_CALLKIT_TYPE, -1)
             startForeground(
@@ -202,6 +228,7 @@ class CallkitNotificationService : Service() {
             } else {
                 startForeground(notificationId, notification)
             }
+            isForeground = true
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start foreground with the placeholder notification", e)
@@ -230,6 +257,7 @@ class CallkitNotificationService : Service() {
         } else {
             startForeground(notificationId, notification)
         }
+        isForeground = true
     }
 
     private fun isPermissionGranted(permission: String): Boolean =
@@ -237,6 +265,7 @@ class CallkitNotificationService : Service() {
 
 
     override fun onDestroy() {
+        isForeground = false
         super.onDestroy()
         // Don't destroy the notification manager here as it's shared across the app
         // The plugin will handle cleanup when all engines are detached
